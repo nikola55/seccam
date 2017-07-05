@@ -1,12 +1,11 @@
-#ifndef H264_ENCODER
-#define H264_ENCODER
+#ifndef H264_ENCODER_H
+#define H264_ENCODER_H
 
 extern "C" {
 #include <libavutil/pixfmt.h>
 }
 
 #include <cstdint>
-#include <cstdio>
 
 struct AVFrame;
 struct AVCodec;
@@ -17,7 +16,7 @@ struct SwsContext;
 
 namespace video {
 
-class tsmux;
+class segmenter;
 
 class h264_encoder {
 public:
@@ -30,9 +29,11 @@ public:
     void on_frame(AVFrame*);
     void on_eof();
 public:
+    void on_segment_end();
+public:
     void initialize(uint32_t w, uint32_t h, AVRational* tb, AVRational* fps, AVPixelFormat pixfmt);
 public:
-    void attach_sink(tsmux* muxer);
+	void attach_sink(segmenter* seg);
 private:
     AVCodec* codec_;
     AVCodecContext* codec_ctx_;
@@ -45,10 +46,9 @@ private:
     AVPixelFormat dst_pixfmt_;
     AVPacket* packet_;
     bool initialized_;
-    FILE *output_;
-    tsmux* muxer_;
+	segmenter* segmenter_;
 };
 
 }
 
-#endif // !H264_ENCODER
+#endif // H264_ENCODER_H

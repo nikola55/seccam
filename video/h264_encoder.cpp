@@ -1,5 +1,7 @@
 #include "h264_encoder.h"
 
+#include "segmenter.h"
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
@@ -22,8 +24,7 @@ h264_encoder::h264_encoder()
     , dst_pixfmt_(AV_PIX_FMT_NONE)
     , packet_(NULL)
     , initialized_(false)
-    , output_(NULL)
-    , muxer_(0) {
+	, segmenter_(NULL) {
 
     codec_ = avcodec_find_encoder(AV_CODEC_ID_H264);
     assert(NULL != codec_);
@@ -31,7 +32,6 @@ h264_encoder::h264_encoder()
     assert(NULL != codec_ctx_);
     packet_ = av_packet_alloc();
     assert(NULL != packet_);
-    output_ = std::fopen("output.h264", "wb");
 }
 
 h264_encoder::~h264_encoder() {
@@ -41,7 +41,6 @@ h264_encoder::~h264_encoder() {
         sws_freeContext(img_convert_ctx_);
         avcodec_close(codec_ctx_);
     }
-    std::fclose(output_);
     av_packet_free(&packet_);
     avcodec_free_context(&codec_ctx_);
 }
@@ -49,10 +48,6 @@ h264_encoder::~h264_encoder() {
 void h264_encoder::on_frame(AVFrame* frame) {
     assert(true == initialized_);
     assert(src_width_ == frame->width && src_height_ == frame->height);
-
-    for(int i = 0 ; i < 3 ; i++) {
-        std::cout << "h264_encoder::on_frame " << frame->linesize[i] << std::endl;
-    }
 
     int ret = sws_scale(img_convert_ctx_, frame->data, frame->linesize, 0, src_height_, 
                         scaled_frame_->data, scaled_frame_->linesize
@@ -64,11 +59,35 @@ void h264_encoder::on_frame(AVFrame* frame) {
     while(true) {
         ret = avcodec_receive_packet(codec_ctx_, packet_);
         if(0 == ret) {
-            fwrite(packet_->data, 1, packet_->size, output_);
+            segmenter_->on_packet(packet_);
+            av_packet_unref(packet_);
         } else {
             break;
         }
     }
+}
+
+void h264_encoder::on_segment_end() {
+    assert(true == initialized_);
+    int ret = avcodec_send_frame(codec_ctx_, NULL);
+    assert(0 <= ret);
+    while(true) {
+        ret = avcodec_receive_packet(codec_ctx_, packet_);
+        if(AVERROR_EOF == ret) {
+            break;
+        }
+        else if (ret < 0) { 
+            assert(false); // TODO: handle error 
+            break;
+        }
+        segmenter_->on_packet(packet_);
+        av_packet_unref(packet_);
+    }
+    segmenter_->on_segment_end();
+    avcodec_flush_buffers(codec_ctx_);
+    avcodec_close(codec_ctx_);
+    ret = avcodec_open2(codec_ctx_, codec_, NULL);
+    assert(0 == ret);
 }
 
 void h264_encoder::on_eof() {
@@ -78,8 +97,10 @@ void h264_encoder::on_eof() {
     while(true) {
         ret = avcodec_receive_packet(codec_ctx_, packet_);
         if(0 != ret) break;
-        fwrite(packet_->data, 1, packet_->size, output_);
+        segmenter_->on_packet(packet_);
+        av_packet_unref(packet_);
     }
+    segmenter_->on_eof();
 }
 
 void h264_encoder::initialize(uint32_t width, uint32_t height, AVRational* tb, AVRational* fps, AVPixelFormat pixfmt) {
@@ -101,9 +122,12 @@ void h264_encoder::initialize(uint32_t width, uint32_t height, AVRational* tb, A
     codec_ctx_->profile = FF_PROFILE_H264_BASELINE;
     codec_ctx_->qmin = 30;
     codec_ctx_->qmax = 70;
+    // codec_ctx_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
     int ret = avcodec_open2(codec_ctx_, codec_, NULL);
     assert(0 == ret);
+
+    // fwrite(codec_ctx_->extradata, 1, codec_ctx_->extradata_size, output_);
 
     img_convert_ctx_ = sws_getContext(src_width_, src_height_, src_pixfmt_, 
                                       src_width_, src_height_, dst_pixfmt_, 
@@ -128,4 +152,10 @@ void h264_encoder::initialize(uint32_t width, uint32_t height, AVRational* tb, A
 
     assert(0 < ret);
     initialized_ = true;
+}
+
+void h264_encoder::attach_sink(segmenter* seg) {
+	assert(NULL == segmenter_);
+	assert(NULL != seg);
+    segmenter_ = seg;
 }

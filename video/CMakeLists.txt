@@ -1,7 +1,5 @@
 cmake_minimum_required(VERSION 2.8)
 project(video)
-# include_directories(/home/nikola/software/libav/install/include)
-# link_directories(/home/nikola/software/libav/install/lib)
 include(Sources.cmake)
 add_library(${PROJECT_NAME} ${SOURCES})
 target_link_libraries(${PROJECT_NAME} avformat avdevice avcodec avutil swscale)

@@ -15,12 +15,15 @@ extern "C" {
 
 using video::v4l_capture;
 
-v4l_capture::v4l_capture()   
+v4l_capture::v4l_capture(long segment_length_sec)   
     : format_context_(NULL)
     , codec_(NULL)
     , codec_ctx_(NULL)
     , frame_(NULL)
-    , encoder_(0) {
+    , encoder_(0)
+    , v4l_stream_(NULL)
+    , prev_ts_(-1)
+    , segment_length_sec_(segment_length_sec) {
 
     AVInputFormat *input_format = av_find_input_format("v4l2");
     assert(NULL != input_format);
@@ -45,7 +48,8 @@ v4l_capture::v4l_capture()
     assert(0 == codec_open);
     frame_ = av_frame_alloc();
     assert(NULL != frame_);
-
+    assert(1 == format_context_->nb_streams);
+    v4l_stream_ = format_context_->streams[0];
 }
 
 v4l_capture::~v4l_capture() {
@@ -59,37 +63,59 @@ void v4l_capture::attach_sink(h264_encoder* enc) {
     assert(0 == encoder_);
     assert(0 != enc);
     encoder_ = enc;
-    assert(1 == format_context_->nb_streams);
-    AVStream* stream = format_context_->streams[0];
-    encoder_->initialize(codec_ctx_->width, codec_ctx_->height, &stream->time_base, &stream->avg_frame_rate, codec_ctx_->pix_fmt);
+    encoder_->initialize(codec_ctx_->width, codec_ctx_->height, &v4l_stream_->time_base, &v4l_stream_->avg_frame_rate, codec_ctx_->pix_fmt);
 }
+
 
 bool v4l_capture::capture() {
 
     assert(0 != encoder_);
 
-    AVPacket* pkt = av_packet_alloc();
-    assert(NULL != pkt);
-    if(0 != av_read_frame(format_context_, pkt)) {
-        av_packet_free(&pkt);
-        stop_capture();
+    if(receive_frame(frame_)) {
+        encoder_->on_frame(frame_);
+        AVRational timebase = v4l_stream_->time_base;
+        long frame_ts = (timebase.num*frame_->pts)/timebase.den;
+        if(-1 == prev_ts_) {
+            prev_ts_ = frame_ts;
+        } else {
+            long diff = frame_ts - prev_ts_;
+            if(diff >= segment_length_sec_) {
+                prev_ts_ = frame_ts;
+                encoder_->on_segment_end();
+            }
+        }
+        av_frame_unref(frame_);
+        return true;
+    } else {   
         return false;
     }
+}
 
-    int ret = avcodec_send_packet(codec_ctx_, pkt);
-    assert(ret >= 0);
+bool v4l_capture::receive_frame(AVFrame* frame) {
     while(true) {
-        ret = avcodec_receive_frame(codec_ctx_, frame_);
-        if(ret == 0) {
-            encoder_->on_frame(frame_);
-            av_frame_unref(frame_);
-        } else {
+        AVPacket* pkt = av_packet_alloc();
+        assert(NULL != pkt);
+        if(0 != av_read_frame(format_context_, pkt)) {
+            av_packet_free(&pkt);
             break;
         }
+        int ret = avcodec_send_packet(codec_ctx_, pkt);
+        if(0 > ret) {
+            break;
+        }
+        av_packet_free(&pkt);
+        while(true) {
+            ret = avcodec_receive_frame(codec_ctx_, frame);
+            if(ret == 0) {
+                return true;
+            } else if(AVERROR(EAGAIN) == ret) {
+                break;
+            } else {
+                return false;
+            }
+        }
     }
-    av_packet_free(&pkt);
-
-    return true;
+    return false;
 }
 
 void v4l_capture::stop_capture() {
