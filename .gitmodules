@@ -1,3 +1,6 @@
 [submodule "libevent"]
 	path = libevent
 	url = https://github.com/libevent/libevent.git
+[submodule "jsoncpp"]
+	path = jsoncpp
+	url = https://github.com/open-source-parsers/jsoncpp.git
