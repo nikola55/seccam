@@ -1,6 +1,6 @@
 #include "segment.h"
 
-using video::segment;
+using common::segment;
 
 const std::uint8_t* segment::buffer() const {
     if(0 != buffer_.size()) {

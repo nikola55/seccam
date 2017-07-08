@@ -20,7 +20,7 @@ class h264_encoder;
 
 class v4l_capture {
 public:
-    v4l_capture(long segment_length_sec = 6);
+    v4l_capture(long segment_length_sec = 5);
     ~v4l_capture();
 private:
     v4l_capture(const v4l_capture&) = delete;

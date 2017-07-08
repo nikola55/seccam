@@ -1,6 +1,6 @@
 #include "segmenter.h"
 
-#include "segment.h"
+#include "common/segment.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -11,7 +11,7 @@ extern "C" {
 using video::segmenter;
 
 segmenter::segmenter(on_segment_ready_cb handle_on_segment_ready, on_eof_cb handle_on_eof, void* ctx)
-    : cseg_(new segment)
+    : cseg_(new common::segment)
     , handle_on_segment_ready_(handle_on_segment_ready)
     , handle_on_eof_(handle_on_eof)
     , ctx_(ctx) {
@@ -30,7 +30,7 @@ void segmenter::on_packet(AVPacket* packet) {
 void segmenter::on_segment_end() {
     assert(NULL != cseg_);
     handle_on_segment_ready_(cseg_, ctx_); // transfer ownership
-    cseg_ = new segment;
+    cseg_ = new common::segment;
 }
 
 void segmenter::on_eof() {

@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <vector>
 
-namespace video {
+namespace common {
 
 class segment {
 public:

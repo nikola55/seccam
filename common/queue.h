@@ -7,11 +7,9 @@
 #include <condition_variable>
 #include <atomic>
 
-namespace video { 
-class segment; 
-}
-
 namespace common {
+
+class segment; 
 
 class queue {
 public:
@@ -21,13 +19,13 @@ private:
     queue(const queue&);
     void operator=(const queue&);
 public:
-    video::segment* pop_segment();
-    void push_segment(video::segment* segment);
+    segment* pop_segment();
+    void push_segment(segment* segment);
 private:
     std::size_t max_buffer_bytes_;
     std::size_t current_buffer_bytes_;
     std::atomic<bool> stop_;
-    std::list<video::segment*> segments_;
+    std::list<segment*> segments_;
     std::condition_variable segments_available_;
     std::mutex segments_available_mutex_;
     std::condition_variable free_buffer_bytes_;
