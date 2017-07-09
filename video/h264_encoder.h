@@ -6,6 +6,7 @@ extern "C" {
 }
 
 #include <cstdint>
+#include <ctime>
 
 struct AVFrame;
 struct AVCodec;
@@ -31,7 +32,13 @@ public:
 public:
     void on_segment_end();
 public:
-    void initialize(uint32_t w, uint32_t h, AVRational* tb, AVRational* fps, AVPixelFormat pixfmt);
+    void initialize(uint32_t w, 
+                    uint32_t h, 
+                    AVRational* tb, 
+                    AVRational* fps, 
+                    AVPixelFormat pixfmt, 
+                    int segment_length_sec
+                    );
 public:
 	void attach_sink(segmenter* seg);
 private:
@@ -47,6 +54,8 @@ private:
     AVPacket* packet_;
     bool initialized_;
 	segmenter* segmenter_;
+    bool end_segment_pending_;
+    std::time_t previous_segment_end_;
 };
 
 }

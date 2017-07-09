@@ -63,7 +63,12 @@ void v4l_capture::attach_sink(h264_encoder* enc) {
     assert(0 == encoder_);
     assert(0 != enc);
     encoder_ = enc;
-    encoder_->initialize(codec_ctx_->width, codec_ctx_->height, &v4l_stream_->time_base, &v4l_stream_->avg_frame_rate, codec_ctx_->pix_fmt);
+    encoder_->initialize(codec_ctx_->width, 
+                         codec_ctx_->height, 
+                         &v4l_stream_->time_base, 
+                         &v4l_stream_->avg_frame_rate, 
+                         codec_ctx_->pix_fmt, 
+                         segment_length_sec_);
 }
 
 

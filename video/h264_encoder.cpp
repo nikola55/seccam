@@ -1,5 +1,7 @@
 #include "h264_encoder.h"
 
+#include "logging/log.h"
+
 #include "segmenter.h"
 
 extern "C" {
@@ -24,7 +26,9 @@ h264_encoder::h264_encoder()
     , dst_pixfmt_(AV_PIX_FMT_NONE)
     , packet_(NULL)
     , initialized_(false)
-	, segmenter_(NULL) {
+	, segmenter_(NULL)
+    , end_segment_pending_(false)
+    , previous_segment_end_(0) {
 
     codec_ = avcodec_find_encoder(AV_CODEC_ID_H264);
     assert(NULL != codec_);
@@ -59,6 +63,23 @@ void h264_encoder::on_frame(AVFrame* frame) {
     while(true) {
         ret = avcodec_receive_packet(codec_ctx_, packet_);
         if(0 == ret) {
+            if((packet_->flags & AV_PKT_FLAG_KEY) && end_segment_pending_) {
+                LOG(common::log::info) << "key packet encoded and end_segment_pending" << common::log::end;
+                if(previous_segment_end_ != 0) {
+                    std::time_t current_segment_end = std::time(nullptr);
+                    std::time_t diff = std::difftime(current_segment_end, previous_segment_end_);
+                    previous_segment_end_ = current_segment_end;
+                    LOG(common::log::info) << "current segment length: " << diff << common::log::end;
+                } else {
+                    previous_segment_end_ = std::time(nullptr);
+                }
+                segmenter_->on_segment_end();
+                end_segment_pending_ = false;
+                AVPacket pkt;
+                pkt.data = codec_ctx_->extradata;
+                pkt.size = codec_ctx_->extradata_size;
+                segmenter_->on_packet(&pkt);
+            }
             segmenter_->on_packet(packet_);
             av_packet_unref(packet_);
         } else {
@@ -69,25 +90,26 @@ void h264_encoder::on_frame(AVFrame* frame) {
 
 void h264_encoder::on_segment_end() {
     assert(true == initialized_);
-    int ret = avcodec_send_frame(codec_ctx_, NULL);
-    assert(0 <= ret);
-    while(true) {
-        ret = avcodec_receive_packet(codec_ctx_, packet_);
-        if(AVERROR_EOF == ret) {
-            break;
-        }
-        else if (ret < 0) { 
-            assert(false); // TODO: handle error 
-            break;
-        }
-        segmenter_->on_packet(packet_);
-        av_packet_unref(packet_);
-    }
-    segmenter_->on_segment_end();
-    avcodec_flush_buffers(codec_ctx_);
-    avcodec_close(codec_ctx_);
-    ret = avcodec_open2(codec_ctx_, codec_, NULL);
-    assert(0 == ret);
+    end_segment_pending_ = true;
+    // int ret = avcodec_send_frame(codec_ctx_, NULL);
+    // assert(0 <= ret);
+    // while(true) {
+    //     ret = avcodec_receive_packet(codec_ctx_, packet_);
+    //     if(AVERROR_EOF == ret) {
+    //         break;
+    //     }
+    //     else if (ret < 0) { 
+    //         assert(false); // TODO: handle error 
+    //         break;
+    //     }
+    //     segmenter_->on_packet(packet_);
+    //     av_packet_unref(packet_);
+    // }
+    // segmenter_->on_segment_end();
+    // avcodec_flush_buffers(codec_ctx_);
+    // avcodec_close(codec_ctx_);
+    // ret = avcodec_open2(codec_ctx_, codec_, NULL);
+    // assert(0 == ret);
 }
 
 void h264_encoder::on_eof() {
@@ -103,7 +125,13 @@ void h264_encoder::on_eof() {
     segmenter_->on_eof();
 }
 
-void h264_encoder::initialize(uint32_t width, uint32_t height, AVRational* tb, AVRational* fps, AVPixelFormat pixfmt) {
+void h264_encoder::initialize(uint32_t width, 
+                              uint32_t height, 
+                              AVRational* tb, 
+                              AVRational* fps, 
+                              AVPixelFormat pixfmt,
+                              int segment_length_sec
+                              ) {
     assert(false == initialized_);
     
     src_width_ = width;
@@ -122,7 +150,8 @@ void h264_encoder::initialize(uint32_t width, uint32_t height, AVRational* tb, A
     codec_ctx_->profile = FF_PROFILE_H264_BASELINE;
     codec_ctx_->qmin = 30;
     codec_ctx_->qmax = 70;
-    // codec_ctx_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    codec_ctx_->gop_size = ((fps->num*segment_length_sec)/fps->den)/3;
+    codec_ctx_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
     int ret = avcodec_open2(codec_ctx_, codec_, NULL);
     assert(0 == ret);
@@ -157,5 +186,10 @@ void h264_encoder::initialize(uint32_t width, uint32_t height, AVRational* tb, A
 void h264_encoder::attach_sink(segmenter* seg) {
 	assert(NULL == segmenter_);
 	assert(NULL != seg);
+    assert(true == initialized_);
     segmenter_ = seg;
+    AVPacket pkt;
+    pkt.data = codec_ctx_->extradata;
+    pkt.size = codec_ctx_->extradata_size;
+    segmenter_->on_packet(&pkt);
 }
