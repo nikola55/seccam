@@ -3,6 +3,8 @@
 
 #include <sstream>
 #include <cassert>
+#include <iomanip>
+#include <ctime>
 
 #include "writer.h"
 
@@ -32,7 +34,10 @@ private:
 public:
 
     logging& begin_log(level l, const char*, const char* func) {
-        ss_ << str_levels[l] << " [" << func << "] ";
+        std::time_t time = std::time(nullptr);
+        std::tm gmtime_tm;
+        gmtime_r(&time, &gmtime_tm);
+        ss_ << "[ " << std::put_time(&gmtime_tm, "%F %T") << " ] " << str_levels[l] << " [" << func << "] ";
         return *this;
     }
 

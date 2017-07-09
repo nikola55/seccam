@@ -36,6 +36,7 @@ log_include_counter _counter_;
 
 } }
 
+// TODO : make thread safe
 #define LOG(level) yavca::common::_logger_->begin_log(level, __FILE__, __PRETTY_FUNCTION__)
 
 namespace common {
