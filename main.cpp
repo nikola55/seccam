@@ -1,6 +1,8 @@
 #include <unistd.h>
 #include <sys/socket.h>
 
+#include "logging/log.h"
+
 #include "video/v4l_capture.h"
 #include "video/h264_encoder.h"
 #include "video/segmenter.h"
@@ -33,14 +35,13 @@ extern "C" {
 
 class video_capture {
 public:
-    video_capture(common::async_segment_queue& queue, int ready_fd) 
+    video_capture(common::async_segment_queue& queue) 
         : queue_(queue)
         , capture_(nullptr)
         , encoder_(nullptr)
         , segmenter_(nullptr)
         , thread_(nullptr)
-        , stop_(false)
-        , ready_fd_(ready_fd) {
+        , stop_(false) {
 
     }
     
@@ -67,7 +68,7 @@ private:
     }
 
     void handle_on_eof() {
-        assert(false);
+        // assert(false);
     }
 public:
     void start_capture() {
@@ -78,16 +79,21 @@ public:
         assert(nullptr != thread_);
         stop_ = true;
     }
+    void join() {
+        thread_->join();
+        delete thread_;
+        thread_ = nullptr;
+    }
 private:
     void run() {
-        std::cout << "VIDEO CAPTURE start" << std::endl;
+        LOG(common::log::info) << "Video subsystem started" << common::log::end;
         capture_ = new video::v4l_capture;
         encoder_ = new video::h264_encoder;
         segmenter_ = new video::segmenter(&video_capture::on_segment_ready, &video_capture::on_eof, this);
 
         capture_->attach_sink(encoder_);
         encoder_->attach_sink(segmenter_);
-
+        
         while(true) {
             if(stop_) {
                 capture_->stop_capture();
@@ -96,7 +102,6 @@ private:
             if(!capture_->capture()) {
                 break;
             }
-            std::cout << "VIDEO CAPTURE frame captured" << std::endl;
         }
 
         delete segmenter_;
@@ -110,20 +115,58 @@ private:
     video::segmenter* segmenter_;
     std::thread* thread_;
     std::atomic<bool> stop_;
-    int ready_fd_;
+};
+
+class ctl_interface {
+public:
+    ctl_interface(event_base* ev_base, video_capture& capture, common::async_segment_queue& queue)
+        : ev_base_(ev_base)
+        , capture_(capture)
+        , queue_(queue) {
+
+    }
+    ~ctl_interface() {} 
+private:
+    ctl_interface(const ctl_interface&) = delete;
+    void operator=(const ctl_interface&) = delete;
+public:
+    void stop_capture() {
+        capture_.stop_capture();
+    }
+    void start_capture() {
+        capture_.start_capture();
+    }
+    void shutdown() {
+        capture_.join();
+        event_base_loopexit(ev_base_, NULL);
+    }
+private:
+    event_base* const ev_base_;
+    video_capture& capture_;
+    common::async_segment_queue& queue_;
 };
 
 void on_connection_ready(void* ctx) {
-    std::cout << "MAIN on_connect" << std::endl;
-    video_capture* capture = static_cast<video_capture*>(ctx);
-    capture->start_capture();
+    LOG(common::log::info) << "Starting video subsystem" << common::log::end;
+    ctl_interface* ctl = static_cast<ctl_interface*>(ctx);
+    ctl->start_capture();
 }
 
 void on_connection_error(void* ctx) {
     // TODO: 
 }
 
-void sigint_function();
+void on_last_request_sent(void* ctx) {
+    LOG(common::log::info) << "Shutdown video subsystem" << common::log::end;
+    ctl_interface* ctl = static_cast<ctl_interface*>(ctx);
+    ctl->shutdown();
+}
+
+void sigint_function(evutil_socket_t, short, void *ctx) {
+    LOG(common::log::info) << "Stoping video subsystem" << common::log::end;
+    ctl_interface* ctl = static_cast<ctl_interface*>(ctx);
+    ctl->stop_capture();
+}
 
 int main(int argc,char* argv[]) {
 
@@ -144,30 +187,38 @@ int main(int argc,char* argv[]) {
     event_base* evbase = event_base_new();
     evdns_base* evdns = evdns_base_new(evbase, EVDNS_BASE_DISABLE_WHEN_INACTIVE);
     evdns_base_nameserver_ip_add(evdns, "8.8.8.8");
-    // event *sigevent = evsignal_new(evbase, SIGINT, sigint_function, NULL);
-
 
     std::string base_uri = "api.dropboxapi.com";
     std::string file_upload_uri = "content.dropboxapi.com";
-    std::string bearer = "I_MCABHFgHwAAAAAAAAAFTXna1oZPqjwpu8VI63W42xP7yRuBH_nVjiEo2YDQm4B";
+    std::string bearer = "###";
     
     {
         common::async_segment_queue queue;
-        video_capture capture(queue, -1);
+        video_capture capture(queue);
 
         {
 
+            ctl_interface ctl(evbase, capture, queue);
+
             net::http_publisher publisher(base_uri, file_upload_uri, bearer, evbase, evdns, ssl_ctx, queue, 
-                                            on_connection_ready, on_connection_error, &capture
-                                        );
+                                          on_connection_ready, on_connection_error, on_last_request_sent, &ctl
+                                         );
+
+            
+
+            event *sigevent = evsignal_new(evbase, SIGINT, sigint_function, &ctl);
+            event_add(sigevent, NULL);
 
             event_base_dispatch(evbase);
 
+            event_free(sigevent);
         }
     }
 
     evdns_base_free(evdns, 0); 
     event_base_free(evbase);
     SSL_CTX_free(ssl_ctx);
+
+    return 0;
 
 }

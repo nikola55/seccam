@@ -34,6 +34,7 @@ void segmenter::on_segment_end() {
 }
 
 void segmenter::on_eof() {
+    cseg_->last_segment(true);
     handle_on_segment_ready_(cseg_, ctx_); // transfer ownership
     handle_on_eof_(ctx_);
     cseg_ = 0;

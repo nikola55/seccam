@@ -39,6 +39,7 @@ public:
                     common::async_segment_queue& queue,
                     connection_event_cb on_connection_ready,
                     connection_event_cb on_connection_error,
+                    connection_event_cb on_last_request_sent,
                     void* ctx
                     );
     ~http_publisher();
@@ -86,12 +87,13 @@ private:
     common::async_segment_queue& queue_;
     connection_event_cb on_connection_ready_;
     connection_event_cb on_connection_error_;
+    connection_event_cb on_last_request_sent_;
     void* ctx_;
     http_connection* api_;
     http_connection* file_upload_;
     std::map<int, api_file> files_by_timestamp_;
     long files_size_;
-    bool exit_pending_;
+    bool last_segment_;
 };
 
 }

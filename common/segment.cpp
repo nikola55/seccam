@@ -2,6 +2,23 @@
 
 using common::segment;
 
+segment::segment() 
+    : last_segment_(false) {
+
+}
+
+segment::~segment() {
+
+}
+
+void segment::last_segment(bool val) {
+    last_segment_ = val;
+}
+
+bool segment::last_segment() const {
+    return last_segment_;
+}
+
 const std::uint8_t* segment::buffer() const {
     if(0 != buffer_.size()) {
         return &buffer_[0];

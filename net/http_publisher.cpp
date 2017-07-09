@@ -1,5 +1,7 @@
 #include "http_publisher.h"
 
+#include "logging/log.h"
+
 #include "common/async_segment_queue.h"
 #include "common/segment.h"
 
@@ -27,6 +29,7 @@ http_publisher::http_publisher(
     common::async_segment_queue& queue,
     connection_event_cb on_connection_ready, 
     connection_event_cb on_connection_error, 
+    connection_event_cb on_last_request_sent,
     void* ctx
     )
     : base_uri_(base_uri)
@@ -38,17 +41,18 @@ http_publisher::http_publisher(
     , queue_(queue)
     , on_connection_ready_(on_connection_ready)
     , on_connection_error_(on_connection_error)
+    , on_last_request_sent_(on_last_request_sent)
     , ctx_(ctx)
     , api_(nullptr)
     , file_upload_(nullptr)
     , files_size_(0)
-    , exit_pending_(false) {
+    , last_segment_(false) {
 
 
     try {
         api_ = new http_connection(base_uri, evbase_, evdns_, ssl_ctx_, &http_publisher::on_connection_lost, this);
     } catch (const std::runtime_error& err) {
-        std::cout << " HTTP PUBLISHER http_publisher::http_publisher " << err.what() << std::endl;
+        LOG(common::log::err) << "Cannot create http_connection to " << base_uri_ << common::log::end;
         return;
     }
     
@@ -56,7 +60,7 @@ http_publisher::http_publisher(
         file_upload_ = new http_connection(file_upload_uri, evbase_, evdns_, ssl_ctx_, &http_publisher::on_connection_lost, this);
     } catch (const std::runtime_error& err) {
         delete api_;
-        std::cout << " HTTP PUBLISHER http_publisher::http_publisher " << err.what() << std::endl;
+        LOG(common::log::err) << "Cannot create http_connection to " << file_upload_uri << common::log::end;
         return;
     }
 
@@ -87,13 +91,13 @@ bool parse_json(const std::vector<uint8_t>& buf, Json::Value* res) {
         const char* end = begin+buf.size();
         Json::Reader reader;
         if(reader.parse(begin, end, *res, false)) {
-            std::cout << "parse_json: data parsed" << std::endl;
+            LOG(common::log::info) << "data parsed" << common::log::end;
             ret = true;
         } else {
-            std::cout << "parse_json: cannot parse data" << std::endl;
+            LOG(common::log::err) << "cannot parse data" << common::log::end;
         }
     } else {
-        std::cout << "parse_json: empty data" << std::endl;
+        LOG(common::log::err) << "empty data" << common::log::end;
     }
     return ret;
 }
@@ -148,8 +152,7 @@ CB_TO_MEMFUN(on_list_folders_complete, handle_on_list_folders_complete);
 
 void http_publisher::handle_on_list_folders_complete(http_request* req, http_response* res) {
     if(res == nullptr) {
-        std::cout << "HTTP PUBLISHER http_publisher::handle_on_list_folders_complete: " 
-                  << "failed " << req->path() << " method " << req->method() << std::endl;
+        LOG(common::log::err) << "failed " << req->method() << " request to " << req->path() << common::log::end;
         delete req;
         return;
     }
@@ -191,27 +194,23 @@ void http_publisher::handle_on_list_folders_complete(http_request* req, http_res
                             std::string cursor = cursor_resp.asString();
                             list_folders_continue(cursor);
                         } else {
-                            std::cout << "HTTP PUBLISHER http_publisher::handle_on_list_folders_complete: "
-                                      << "invalid response format cursor missing" << std::endl;
+                            LOG(common::log::err) << "invalid response format cursor missing" << common::log::end;
                         }
                     } else {
                         create_app_folder();
                     }
                 } else {
-                    std::cout << "HTTP PUBLISHER http_publisher::handle_on_list_folders_complete: "
-                              << "invalid response format has_more missing" << std::endl;
-                    
+                    LOG(common::log::err) << "invalid response format has_more missing" << common::log::end;
                 }
             } else {
                 // folder found
                 list_app_folder();
             }
         } else {
-            std::cout << "HTTP PUBLISHER http_publisher::handle_on_list_folders_complete: "
-                      << "invalid response format entries missing" << std::endl;
+            LOG(common::log::err) << "invalid response format entries missing" << common::log::end;
         }
     } else {
-        std::cout << "HTTP PUBLISHER http_publisher::handle_on_list_folders_complete: failed to parse response " << std::endl;
+        LOG(common::log::err) << "failed to parse response" << common::log::end;
     }
 
     delete req;
@@ -223,8 +222,6 @@ void http_publisher::list_folders_continue(const std::string& cursor) {
 }
 
 void http_publisher::create_app_folder() {
-
-    std::cout << "HTTP PUBLISHER http_publisher::on_folder_not_found" << std::endl;
 
     Json::Value root;
     root["path"] = "/_seccam_";
@@ -240,8 +237,7 @@ CB_TO_MEMFUN(on_create_folder_complete, handle_on_create_folder_complete);
 
 void http_publisher::handle_on_create_folder_complete(http_request* req, http_response* res) {
     if(res == nullptr) {
-        std::cout << "HTTP PUBLISHER http_publisher::handle_on_create_folder_complete: " 
-                  << "failed " << req->path() << " method " << req->method() << std::endl;
+        LOG(common::log::err) << "failed " << req->method() << " request to " << req->path() << common::log::end;
         delete req;
         return;
     }
@@ -258,20 +254,16 @@ void http_publisher::handle_on_create_folder_complete(http_request* req, http_re
                 if(path_lower == "/_seccam_") {
                     on_enumerate_files_complete();
                 } else {
-                    std::cout << "HTTP PUBLISHER http_publisher::handle_on_create_folder_complete: " 
-                              << "error! returned path is " << path_lower << std::endl;
+                    LOG(common::log::err) << "returned path is " << path_lower << common::log::end;
                 }
             } else {
-                std::cout << "HTTP PUBLISHER http_publisher::handle_on_create_folder_complete: " 
-                          << "malformed create folder response" << std::endl;
+                LOG(common::log::err) << "malformed create folder response" << common::log::end;
             }
         } else {
-            std::cout << "HTTP PUBLISHER http_publisher::handle_on_create_folder_complete: " 
-                      << "create folder failed" << std::endl;
+            LOG(common::log::err) << "create folder failed" << common::log::end;
         }
     } else {
-        std::cout << "HTTP PUBLISHER http_publisher::handle_on_create_folder_complete: " 
-                  << "failed to parse the response" << std::endl;
+        LOG(common::log::err) << "failed to parse response" << common::log::end;
     }
 
     delete req;
@@ -279,7 +271,7 @@ void http_publisher::handle_on_create_folder_complete(http_request* req, http_re
 }
 
 void http_publisher::on_enumerate_files_complete() {
-    std::cout << "HTTP PUBLISHER http_publisher::on_enumerate_files_complete" << std::endl;
+    LOG(common::log::info) << "connection ready" << common::log::end;
     on_connection_ready_(ctx_);
     pop_segment();
 }
@@ -290,17 +282,20 @@ void http_publisher::pop_segment() {
         seg = queue_.pop(std::chrono::milliseconds(6000));
         if(nullptr != seg) {
             break;
-        } else if (exit_pending_) {
+        } else if (last_segment_) {
+            LOG(common::log::info) << "no more segments" << common::log::end;
             break;
         }
     }
     if(nullptr != seg) {
         send_segment(seg);
+    } else {
+        on_last_request_sent_(ctx_);
     }
 }
 
 static void free_segment(void* ctx) {
-    std::cout << "HTTP PUBLISHER delete segment" << std::endl;
+    LOG(common::log::info) << "delete segment" << common::log::end;
     common::segment* seg = static_cast<common::segment*>(ctx);
     delete seg;
 }
@@ -308,6 +303,7 @@ static void free_segment(void* ctx) {
 void http_publisher::send_segment(common::segment* seg) {
 
     long new_size = files_size_ + seg->size();
+    last_segment_ = seg->last_segment();
 
     if(new_size >= (1024*1024*1024)*2l) {
         // TODO: delete most recent file and then resend
@@ -338,10 +334,8 @@ void http_publisher::send_segment(common::segment* seg) {
 CB_TO_MEMFUN(on_send_segment_complete, handle_on_send_segment_complete);
 
 void http_publisher::handle_on_send_segment_complete(http_request* req, http_response* res) {
-    std::cout << "HTTP PUBLISHER http_publisher::handle_on_send_segment_complete" << std::endl;
     if(!res) {
-        std::cout << "HTTP PUBLISHER http_publisher::handle_on_send_segment_complete: " 
-                  << "failed " << req->path() << " method " << req->method() << std::endl;
+        LOG(common::log::err) << "failed " << req->method() << " request to " << req->path() << common::log::end;
         delete req;
         return;
     }
@@ -371,16 +365,13 @@ void http_publisher::handle_on_send_segment_complete(http_request* req, http_res
                 assert(true == inserted);
                 send_new_segment = true;
             } else {
-                std::cout << "HTTP PUBLISHER http_publisher::handle_on_list_app_folder_complete: "
-                      << "invalid response filename is not a number" << std::endl;
+                LOG(common::log::err) << "invalid response filename is not a number" << common::log::end;
             }
         } else {
-            std::cout << "HTTP PUBLISHER http_publisher::handle_on_list_app_folder_complete: "
-                      << "invalid response " << std::endl;
+            LOG(common::log::err) << "invalid response" << common::log::end;
         }
     } else {
-        std::cout << "HTTP PUBLISHER http_publisher::handle_on_list_app_folder_complete: " 
-                  << "failed to parse the response" << std::endl;
+        LOG(common::log::err) << "failed to parse response" << common::log::end;
     }
 
 
@@ -395,7 +386,6 @@ void http_publisher::handle_on_send_segment_complete(http_request* req, http_res
 }
 
 void http_publisher::list_app_folder() {
-    std::cout << "HTTP PUBLISHER http_publisher::on_folder_found" << std::endl;
 
     Json::Value root;
     root["path"] = "/_seccam_";
@@ -416,12 +406,12 @@ void http_publisher::append_to_files(Json::Value& entries) {
     for(int i = 0 ; i < entries.size() ; i++) {
         Json::Value& entry = entries[i];
         if(!entry.isObject()) {
-            std::cout << "HTTP PUBLISHER http_publisher::append_to_files: skip invalid entry" << std::endl;
+            LOG(common::log::info) << "skip invalid entry" << common::log::end;
             continue;
         }
         Json::Value& tag_resp = entry[".tag"];
         if(!tag_resp.isString()) {
-            std::cout << "HTTP PUBLISHER http_publisher::append_to_files: skip invalid entry" << std::endl;
+            LOG(common::log::info) << "skip invalid entry" << common::log::end;
             continue;
         }
         std::string tag = tag_resp.asString();
@@ -430,8 +420,8 @@ void http_publisher::append_to_files(Json::Value& entries) {
             std::string filename = entry["name"].asString();
             int timestamp = std::atoi(filename.c_str());
             if(0 == timestamp) {
-                std::cout << "HTTP PUBLISHER http_publisher::append_to_files: "
-                            << " invalid file " << filename << std::endl;
+                LOG(common::log::err) <<  "invalid file " << filename << common::log::end;
+                continue;
             }
             
             api_file file = {
@@ -448,17 +438,25 @@ void http_publisher::append_to_files(Json::Value& entries) {
             assert(true == inserted);
 
         } else {
-            std::cout << "HTTP PUBLISHER http_publisher::append_to_files: "
-                        << "found unexpected entry " << tag << " ignoring" << std::endl;
+            LOG(common::log::err) << "found unexpected entry " << tag << " ignoring" << common::log::end;
         }
     }
 }
 
+void http_publisher::list_app_folder_continue(const std::string& cursor) {
+
+    Json::Value root;
+    root["cursor"] = cursor;
+
+    make_request_with_body("POST", "/2/files/list_folder/continue", base_uri_, bearer_, root,
+                           api_, &http_publisher::on_list_app_folder_complete, this
+                           );
+
+}
+
 void http_publisher::handle_on_list_app_folder_complete(http_request* req, http_response* res) {
-    std::cout << "HTTP PUBLISHER http_publisher::handle_on_list_app_folder_complete" << std::endl;
     if(!res) {
-        std::cout << "HTTP PUBLISHER http_publisher::handle_on_list_app_folder_complete: " 
-                  << "failed " << req->path() << " method " << req->method() << std::endl;
+        LOG(common::log::err) << "failed " << req->method() << " request to " << req->path() << common::log::end;
         delete req;
         return;
     }
@@ -478,31 +476,16 @@ void http_publisher::handle_on_list_app_folder_complete(http_request* req, http_
                     on_enumerate_files_complete();
                 }
             } else {
-                std::cout << "HTTP PUBLISHER http_publisher::handle_on_list_app_folder_complete: "
-                      << "invalid response format has_more missing" << std::endl;
+                LOG(common::log::err) << "invalid response format has_more missing" << common::log::end;
             }
         } else {
-            std::cout << "HTTP PUBLISHER http_publisher::handle_on_list_app_folder_complete: "
-                      << "invalid response format entries missing" << std::endl;
+            LOG(common::log::err) << "invalid response format entries missing" << common::log::end;
         }
     } else {
-        std::cout << "HTTP PUBLISHER http_publisher::handle_on_list_app_folder_complete: " 
-                  << "failed to parse the response" << std::endl;
+        LOG(common::log::err) << "failed to parse the response" << common::log::end;
     }
 
     delete req;
     delete res;
-}
-
-void http_publisher::list_app_folder_continue(const std::string& cursor) {
-    std::cout << "HTTP PUBLISHER http_publisher::on_folder_found" << std::endl;
-
-    Json::Value root;
-    root["cursor"] = cursor;
-
-    make_request_with_body("POST", "/2/files/list_folder/continue", base_uri_, bearer_, root,
-                           api_, &http_publisher::on_list_app_folder_complete, this
-                           );
-
 }
 
