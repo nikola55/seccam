@@ -144,7 +144,7 @@ void h264_encoder::initialize(uint32_t width,
     codec_ctx_->width = src_width_;
     codec_ctx_->height = src_height_;
     codec_ctx_->time_base.den = fps->num;
-    codec_ctx_->time_base.num = 1;
+    codec_ctx_->time_base.num = fps->den;
     codec_ctx_->framerate = *fps;
     codec_ctx_->pix_fmt = dst_pixfmt_;
     codec_ctx_->profile = FF_PROFILE_H264_BASELINE;

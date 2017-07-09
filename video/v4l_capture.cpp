@@ -1,5 +1,7 @@
 #include "v4l_capture.h"
 
+#include "logging/log.h"
+
 #include "h264_encoder.h"
 
 extern "C" {
@@ -27,9 +29,12 @@ v4l_capture::v4l_capture(long segment_length_sec)
 
     AVInputFormat *input_format = av_find_input_format("v4l2");
     assert(NULL != input_format);
+    AVDictionary *options = NULL;
+    av_dict_set(&options, "framerate", "2/15", 0);
 
-    avformat_open_input(&format_context_, "/dev/video0", input_format, NULL);
+    avformat_open_input(&format_context_, "/dev/video0", input_format, &options);
     assert(NULL != format_context_);
+    av_dict_free(&options);
     
     int ret = avformat_find_stream_info(format_context_, NULL);
     assert(0 <= ret);
@@ -63,6 +68,14 @@ void v4l_capture::attach_sink(h264_encoder* enc) {
     assert(0 == encoder_);
     assert(0 != enc);
     encoder_ = enc;
+
+    LOG(common::log::info) << "width=" << codec_ctx_->width << common::log::end;
+    LOG(common::log::info) << "height=" << codec_ctx_->height << common::log::end;
+    LOG(common::log::info) << "timebase=" << v4l_stream_->time_base.num << "/" << v4l_stream_->time_base.den << common::log::end;
+    LOG(common::log::info) << "avg_frame_rate=" << v4l_stream_->avg_frame_rate.num << "/" << v4l_stream_->avg_frame_rate.den << common::log::end;
+    LOG(common::log::info) << "pix_fmt=" << codec_ctx_->pix_fmt << common::log::end;
+    LOG(common::log::info) << "segment_length_sec_=" << segment_length_sec_ << common::log::end;
+
     encoder_->initialize(codec_ctx_->width, 
                          codec_ctx_->height, 
                          &v4l_stream_->time_base, 
