@@ -2,7 +2,6 @@
 
 #include "logging/log.h"
 
-#include "common/async_segment_queue.h"
 #include "common/segment.h"
 
 #include "http_connection.h"
@@ -10,12 +9,15 @@
 #include "http_response.h"
 
 #include <json/json.h>
+#include <event2/event.h>
+
+#include <unistd.h>
 
 #include <stdexcept>
 #include <iostream>
 #include <sstream>
 #include <cassert>
-#include <chrono>
+#include <cstring>
 
 using net::http_publisher;
 
@@ -26,7 +28,7 @@ http_publisher::http_publisher(
     event_base* evbase,
     evdns_base* evdns,
     SSL_CTX* ssl_ctx,
-    common::async_segment_queue& queue,
+    int read_segment_fd,
     connection_event_cb on_connection_ready, 
     connection_event_cb on_connection_error, 
     connection_event_cb on_last_request_sent,
@@ -38,7 +40,8 @@ http_publisher::http_publisher(
     , evbase_(evbase)
     , evdns_(evdns)
     , ssl_ctx_(ssl_ctx)
-    , queue_(queue)
+    , read_segment_fd_(read_segment_fd)
+    , read_segments_event_(NULL)
     , on_connection_ready_(on_connection_ready)
     , on_connection_error_(on_connection_error)
     , on_last_request_sent_(on_last_request_sent)
@@ -50,37 +53,102 @@ http_publisher::http_publisher(
 
 
     try {
-        api_ = new http_connection(base_uri, evbase_, evdns_, ssl_ctx_, &http_publisher::on_connection_lost, this);
+        api_ = new http_connection(base_uri_, evbase_, evdns_, ssl_ctx_, &http_publisher::on_api_connection_lost, this);
     } catch (const std::runtime_error& err) {
         LOG(common::log::err) << "Cannot create http_connection to " << base_uri_ << common::log::end;
         return;
     }
     
     try {
-        file_upload_ = new http_connection(file_upload_uri, evbase_, evdns_, ssl_ctx_, &http_publisher::on_connection_lost, this);
+        file_upload_ = new http_connection(file_upload_uri_, evbase_, evdns_, ssl_ctx_, &http_publisher::on_file_upload_connection_lost, this);
     } catch (const std::runtime_error& err) {
         delete api_;
         LOG(common::log::err) << "Cannot create http_connection to " << file_upload_uri << common::log::end;
         return;
     }
 
+    read_segments_event_ = event_new(evbase_, read_segment_fd_, EV_READ|EV_PERSIST, &http_publisher::on_segments, this);
+    assert(NULL != read_segments_event_);
+    event_add(read_segments_event_, NULL);
+
     list_folders();
 
 }
 
 http_publisher::~http_publisher() {
+    event_free(read_segments_event_);
     delete file_upload_;
     delete api_;
 }
 
-void http_publisher::on_connection_lost(void* ctx) {
-    http_publisher* httppub = static_cast<http_publisher*>(ctx);
-    httppub->handle_on_connection_lost();
+void http_publisher::on_segments(int, short what, void *ctx) {
+    assert(EV_READ == what);
+    static_cast<http_publisher*>(ctx)->handle_on_segments();
 }
 
-void http_publisher::handle_on_connection_lost() {
-    // TODO: invent retry mechanism
+void http_publisher::handle_on_segments() {
+    LOG(common::log::info) << "reading segment" << common::log::end;
+    bool segments_added = false;
+    while(true) {
+        std::uintptr_t seg_ptr;
+        ssize_t ret = read(read_segment_fd_, &seg_ptr, sizeof(seg_ptr));
+        if(ret == sizeof(seg_ptr)) {
+            LOG(common::log::info) << "adding segment" << common::log::end;
+            common::segment* seg = reinterpret_cast<common::segment*>(seg_ptr);
+            segment_list_.push_back(seg);
+            segments_added = true;
+        } else {
+            if(ret == 0) {
+                // EOF
+                LOG(common::log::err) << "EOF" << common::log::end;
+                assert(false);
+                return;
+            } else if (ret < 0) {
+                if(errno == EINTR) {
+                    continue;
+                } else if (errno == EWOULDBLOCK || errno == EAGAIN) {
+                    break;
+                } else {
+                    // fatal error
+                    int err = errno;
+                    LOG(common::log::err) << "errno=" << std::strerror(err) << common::log::end;
+                    assert(false);
+                    return;
+                }
+            } else {
+                // TODO: incomplete read
+                assert(false);
+                return;
+            }
+        }
+    }
+    if(segments_added) {
+        pop_segment();
+    }
 }
+
+void http_publisher::on_api_connection_lost(void* ctx) {
+    http_publisher* httppub = static_cast<http_publisher*>(ctx);
+    httppub->handle_on_api_connection_lost();
+}
+
+void http_publisher::handle_on_api_connection_lost() {
+    LOG(common::log::info) << " refresh api connection " << common::log::end;
+    // delete api_;
+    // api_ = new http_connection(base_uri_, evbase_, evdns_, ssl_ctx_, &http_publisher::on_api_connection_lost, this);
+}
+
+void http_publisher::on_file_upload_connection_lost(void* ctx) {
+    http_publisher* httppub = static_cast<http_publisher*>(ctx);
+    httppub->handle_on_file_upload_connection_lost();
+}
+
+void http_publisher::handle_on_file_upload_connection_lost() {
+    LOG(common::log::info) << " refresh file upload connection " << common::log::end;
+    // delete file_upload_;
+    // file_upload_ = new http_connection(file_upload_uri_, evbase_, evdns_, ssl_ctx_, &http_publisher::on_file_upload_connection_lost, this);
+}
+
 
 namespace {
 
@@ -273,23 +341,16 @@ void http_publisher::handle_on_create_folder_complete(http_request* req, http_re
 void http_publisher::on_enumerate_files_complete() {
     LOG(common::log::info) << "connection ready" << common::log::end;
     on_connection_ready_(ctx_);
-    pop_segment();
 }
 
 void http_publisher::pop_segment() {
-    common::segment* seg = nullptr;
-    while(true) {
-        seg = queue_.pop(std::chrono::milliseconds(6000));
-        if(nullptr != seg) {
-            break;
-        } else if (last_segment_) {
-            LOG(common::log::info) << "no more segments" << common::log::end;
-            break;
-        }
-    }
-    if(nullptr != seg) {
+    if(segment_list_.size() > 0) {
+        common::segment* seg = segment_list_.front();
+        LOG(common::log::info) << "sending segment size=" << seg->size() << common::log::end;
+        segment_list_.pop_front();
         send_segment(seg);
-    } else {
+    } else if (last_segment_) {
+        LOG(common::log::info) << "no more segments" << common::log::end;
         on_last_request_sent_(ctx_);
     }
 }

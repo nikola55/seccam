@@ -7,16 +7,17 @@
 
 #include <string>
 #include <map>
+#include <list>
 
 struct event_base;
 struct evdns_base;
+struct event;
 
 namespace Json {
     class Value;
 }
 
 namespace common {
-    class async_segment_queue;
     class segment;
 }
 
@@ -36,7 +37,7 @@ public:
                     event_base* evbase,
                     evdns_base* evdns,
                     SSL_CTX* ssl_ctx,
-                    common::async_segment_queue& queue,
+                    int read_segment_fd,
                     connection_event_cb on_connection_ready,
                     connection_event_cb on_connection_error,
                     connection_event_cb on_last_request_sent,
@@ -44,11 +45,17 @@ public:
                     );
     ~http_publisher();
 private:
+    static void on_segments(int, short what, void *ctx);
+    void handle_on_segments();
+private:
     http_publisher(const http_publisher&) = delete;
     void operator=(const http_publisher&) = delete;
 private:
-    static void on_connection_lost(void*);
-    void handle_on_connection_lost();
+    static void on_api_connection_lost(void*);
+    void handle_on_api_connection_lost();
+
+    static void on_file_upload_connection_lost(void*);
+    void handle_on_file_upload_connection_lost();
 private:
     void list_folders();
     void list_folders_continue(const std::string& cursor);
@@ -84,7 +91,9 @@ private:
     event_base* evbase_;
     evdns_base* evdns_;
     SSL_CTX* ssl_ctx_;
-    common::async_segment_queue& queue_;
+    int read_segment_fd_;
+    event* read_segments_event_;
+    std::list<common::segment*> segment_list_;
     connection_event_cb on_connection_ready_;
     connection_event_cb on_connection_error_;
     connection_event_cb on_last_request_sent_;

@@ -1,5 +1,6 @@
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/fcntl.h>
 
 #include "logging/log.h"
 
@@ -7,7 +8,6 @@
 #include "video/h264_encoder.h"
 #include "video/segmenter.h"
 #include "common/segment.h"
-#include "common/async_segment_queue.h"
 
 #include "net/http_publisher.h"
 
@@ -19,6 +19,7 @@
 #include <thread>
 #include <functional>
 #include <atomic>
+#include <cstring>
 
 extern "C" {
 #include <libavutil/imgutils.h>
@@ -35,13 +36,13 @@ extern "C" {
 
 class video_capture {
 public:
-    video_capture(common::async_segment_queue& queue) 
-        : queue_(queue)
-        , capture_(nullptr)
+    video_capture(int vc_writer_fd)
+        : capture_(nullptr)
         , encoder_(nullptr)
         , segmenter_(nullptr)
         , thread_(nullptr)
-        , stop_(false) {
+        , stop_(false)
+        , vc_writer_fd_(vc_writer_fd) {
 
     }
     
@@ -57,9 +58,11 @@ private:
         video_capture* vid_cap = static_cast<video_capture*>(ctx);
         vid_cap->handle_on_segment_ready(segment);
     }
-
+    // called from std::thread video_capture::thread_
     void handle_on_segment_ready(common::segment* segment) {
-        queue_.push(segment);
+        LOG(common::log::info) << "writing segment" << common::log::end;
+        std::uintptr_t seg_ptr = reinterpret_cast<uintptr_t>(segment);
+        write(vc_writer_fd_, &seg_ptr, sizeof(std::uintptr_t));
     }
 
     static void on_eof(void* ctx) {
@@ -68,6 +71,7 @@ private:
     }
 
     void handle_on_eof() {
+        // called on video capture thread
         // assert(false);
     }
 public:
@@ -109,21 +113,19 @@ private:
         delete capture_;
     }
 private:
-    common::async_segment_queue& queue_;
     video::v4l_capture* capture_;
     video::h264_encoder* encoder_;
     video::segmenter* segmenter_;
     std::thread* thread_;
     std::atomic<bool> stop_;
+    int vc_writer_fd_;
 };
 
 class ctl_interface {
 public:
-    ctl_interface(event_base* ev_base, video_capture& capture, common::async_segment_queue& queue)
+    ctl_interface(event_base* ev_base, video_capture& capture)
         : ev_base_(ev_base)
-        , capture_(capture)
-        , queue_(queue) {
-
+        , capture_(capture) {
     }
     ~ctl_interface() {} 
 private:
@@ -143,7 +145,6 @@ public:
 private:
     event_base* const ev_base_;
     video_capture& capture_;
-    common::async_segment_queue& queue_;
 };
 
 void on_connection_ready(void* ctx) {
@@ -191,16 +192,23 @@ int main(int argc,char* argv[]) {
     std::string base_uri = "api.dropboxapi.com";
     std::string file_upload_uri = "content.dropboxapi.com";
     std::string bearer = "###";
+
+    int queue_fds[2];
+    if(socketpair(AF_UNIX, SOCK_STREAM, 0, queue_fds) < 0) {
+        assert(NULL == "cannot create socket pair");
+    }
     
+    fcntl(queue_fds[0], F_SETFL, fcntl(queue_fds[0], F_GETFL, 0) | O_NONBLOCK);
+    fcntl(queue_fds[1], F_SETFL, fcntl(queue_fds[1], F_GETFL, 0) | O_NONBLOCK);
+
     {
-        common::async_segment_queue queue;
-        video_capture capture(queue);
+        video_capture capture(queue_fds[0]);
 
         {
 
-            ctl_interface ctl(evbase, capture, queue);
+            ctl_interface ctl(evbase, capture);
 
-            net::http_publisher publisher(base_uri, file_upload_uri, bearer, evbase, evdns, ssl_ctx, queue, 
+            net::http_publisher publisher(base_uri, file_upload_uri, bearer, evbase, evdns, ssl_ctx, queue_fds[1],
                                           on_connection_ready, on_connection_error, on_last_request_sent, &ctl
                                          );
 
@@ -214,6 +222,20 @@ int main(int argc,char* argv[]) {
             event_free(sigevent);
         }
     }
+
+    while(true) {
+        std::uintptr_t seg_ptr;
+        ssize_t rc = read(queue_fds[1], &seg_ptr, sizeof(std::uintptr_t));
+        if(rc == sizeof(std::uintptr_t)) {
+            common::segment* seg = reinterpret_cast<common::segment*>(seg_ptr);
+            delete seg;
+        } else {
+            break;
+        }
+    }
+
+    close(queue_fds[0]);
+    close(queue_fds[1]);
 
     evdns_base_free(evdns, 0); 
     event_base_free(evbase);

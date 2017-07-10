@@ -35,6 +35,7 @@ http_connection::http_connection(
     assert(NULL != bev_);
     bufferevent_openssl_set_allow_dirty_shutdown(bev_, 1);
     evconnection_ = evhttp_connection_base_bufferevent_new(evbase_, evdns_, bev_, base_uri.c_str(), 443);
+    evhttp_connection_set_retries(evconnection_, -1);
     evhttp_connection_set_closecb(evconnection_, &http_connection::on_connection_close, this);
 
 }
