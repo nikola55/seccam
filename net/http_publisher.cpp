@@ -133,7 +133,7 @@ void http_publisher::handle_on_segments() {
             }
         }
     }
-    if(segments_added && (state_ == idle || state_ == terminating_video)) {
+    if(segments_added && state_ == idle) {
         pop_segment();
     }
 }
@@ -402,10 +402,15 @@ void http_publisher::pop_segment() {
         LOG(common::log::info) << "sending segment size=" << seg->size() << common::log::end;
         segment_list_.pop_front();
         send_segment(seg);
-    } else if (last_segment_) {
-        LOG(common::log::info) << "no more segments" << common::log::end;
-        state_ = terminating_video;
-        on_last_request_sent_(ctx_);
+    } else {
+        if (last_segment_) {
+            LOG(common::log::info) << "no more segments" << common::log::end;
+            state_ = terminating_video;
+            on_last_request_sent_(ctx_);
+        } else {
+            LOG(common::log::info) << "segments list is empty - going idle" << common::log::end;
+            state_ = idle;
+        }
     }
 }
 
@@ -456,6 +461,8 @@ CB_TO_MEMFUN(on_send_segment_complete, handle_on_send_segment_complete);
 
 void http_publisher::handle_on_send_segment_complete(http_request* req, http_response* res) {
 
+    LOG(common::log::info) << "segment sent" << common::log::end;
+
     if(state_ != sending_segment) {
         assert(state_ == sending_segment);
     }
@@ -505,6 +512,7 @@ void http_publisher::handle_on_send_segment_complete(http_request* req, http_res
     delete res;
 
     if(send_new_segment) {
+        LOG(common::log::info) << "pop new segment" << common::log::end;
         pop_segment();
     }
 }
