@@ -83,6 +83,8 @@ private:
     static void on_send_segment_complete(http_request*, http_response*, void*);
     void handle_on_send_segment_complete(http_request*, http_response*);
 private:
+    bool validate_response(http_response* resp);
+private:
     void append_to_files(Json::Value& entries);
 private:
     std::string base_uri_;
@@ -103,6 +105,23 @@ private:
     std::map<int, api_file> files_by_timestamp_;
     long files_size_;
     bool last_segment_;
+private:
+    enum http_state {
+        initializing,
+        listing_root_folder,
+        listing_root_folder_continue,
+        creating_app_folder,
+        listing_app_folder,
+        listing_app_folder_continue,
+        generic_http_error,
+        starting_video_thread,
+        idle,
+        popping_segment,
+        sending_segment,
+        terminating_video
+    };
+private:
+    http_state state_;
 };
 
 }

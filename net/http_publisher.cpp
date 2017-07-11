@@ -49,7 +49,8 @@ http_publisher::http_publisher(
     , api_(nullptr)
     , file_upload_(nullptr)
     , files_size_(0)
-    , last_segment_(false) {
+    , last_segment_(false)
+    , state_(initializing) {
 
 
     try {
@@ -76,6 +77,10 @@ http_publisher::http_publisher(
 }
 
 http_publisher::~http_publisher() {
+
+    for(; segment_list_.size() != 0; segment_list_.pop_front())
+        delete segment_list_.front();
+
     event_free(read_segments_event_);
     delete file_upload_;
     delete api_;
@@ -87,6 +92,12 @@ void http_publisher::on_segments(int, short what, void *ctx) {
 }
 
 void http_publisher::handle_on_segments() {
+    if(state_ != idle && state_ != popping_segment && state_ != sending_segment) {
+        assert(state_ == idle ||
+               state_ == popping_segment ||
+               state_ == sending_segment);
+        return;
+    }
     LOG(common::log::info) << "reading segment" << common::log::end;
     bool segments_added = false;
     while(true) {
@@ -122,7 +133,7 @@ void http_publisher::handle_on_segments() {
             }
         }
     }
-    if(segments_added) {
+    if(segments_added && (state_ == idle || state_ == terminating_video)) {
         pop_segment();
     }
 }
@@ -197,6 +208,12 @@ void make_request_with_body(const std::string& method,
 
 void http_publisher::list_folders() {
 
+    if(state_ != initializing) {
+        assert(state_ == initializing);
+    }
+
+    state_ = listing_root_folder;
+
     Json::Value root;
     root["path"] = "";
     root["recursive"] = false;
@@ -219,9 +236,16 @@ void http_publisher::list_folders() {
 CB_TO_MEMFUN(on_list_folders_complete, handle_on_list_folders_complete);
 
 void http_publisher::handle_on_list_folders_complete(http_request* req, http_response* res) {
-    if(res == nullptr) {
+
+    if(state_ != listing_root_folder) {
+        assert(state_ == listing_root_folder);
+    }
+
+    if(!validate_response(res)) {
         LOG(common::log::err) << "failed " << req->method() << " request to " << req->path() << common::log::end;
         delete req;
+        delete res;
+        // listing_root_dir_failed
         return;
     }
 
@@ -262,12 +286,14 @@ void http_publisher::handle_on_list_folders_complete(http_request* req, http_res
                             std::string cursor = cursor_resp.asString();
                             list_folders_continue(cursor);
                         } else {
+                            // listing_root_dir_failed
                             LOG(common::log::err) << "invalid response format cursor missing" << common::log::end;
                         }
                     } else {
                         create_app_folder();
                     }
                 } else {
+                    // listing_root_dir_failed
                     LOG(common::log::err) << "invalid response format has_more missing" << common::log::end;
                 }
             } else {
@@ -275,9 +301,11 @@ void http_publisher::handle_on_list_folders_complete(http_request* req, http_res
                 list_app_folder();
             }
         } else {
+            // listing_root_dir_failed
             LOG(common::log::err) << "invalid response format entries missing" << common::log::end;
         }
     } else {
+        // listing_root_dir_failed
         LOG(common::log::err) << "failed to parse response" << common::log::end;
     }
 
@@ -290,6 +318,12 @@ void http_publisher::list_folders_continue(const std::string& cursor) {
 }
 
 void http_publisher::create_app_folder() {
+
+    if(state_ != listing_root_folder) {
+        assert(state_ == listing_root_folder);
+    }
+
+    state_ = creating_app_folder;
 
     Json::Value root;
     root["path"] = "/_seccam_";
@@ -304,8 +338,14 @@ void http_publisher::create_app_folder() {
 CB_TO_MEMFUN(on_create_folder_complete, handle_on_create_folder_complete);
 
 void http_publisher::handle_on_create_folder_complete(http_request* req, http_response* res) {
-    if(res == nullptr) {
+
+    if(state_ != creating_app_folder) {
+        assert(state_ == creating_app_folder);
+    }
+
+    if(!validate_response(res)) {
         LOG(common::log::err) << "failed " << req->method() << " request to " << req->path() << common::log::end;
+        delete res;
         delete req;
         return;
     }
@@ -340,10 +380,23 @@ void http_publisher::handle_on_create_folder_complete(http_request* req, http_re
 
 void http_publisher::on_enumerate_files_complete() {
     LOG(common::log::info) << "connection ready" << common::log::end;
+    if(state_ != listing_app_folder && state_ != listing_app_folder_continue && state_ != creating_app_folder) {
+        assert(state_ == listing_app_folder ||
+               state_ == listing_app_folder_continue ||
+               state_ == creating_app_folder);
+    }
+    state_ = idle;
     on_connection_ready_(ctx_);
 }
 
 void http_publisher::pop_segment() {
+    if(state_ != idle && state_ != sending_segment) {
+        assert(state_ == idle || state_ == sending_segment);
+        return;
+    }
+
+    state_ = popping_segment;
+
     if(segment_list_.size() > 0) {
         common::segment* seg = segment_list_.front();
         LOG(common::log::info) << "sending segment size=" << seg->size() << common::log::end;
@@ -351,6 +404,7 @@ void http_publisher::pop_segment() {
         send_segment(seg);
     } else if (last_segment_) {
         LOG(common::log::info) << "no more segments" << common::log::end;
+        state_ = terminating_video;
         on_last_request_sent_(ctx_);
     }
 }
@@ -362,6 +416,12 @@ static void free_segment(void* ctx) {
 }
 
 void http_publisher::send_segment(common::segment* seg) {
+
+    if(state_ != popping_segment) {
+        assert(state_ == popping_segment);
+    }
+
+    state_ = sending_segment;
 
     long new_size = files_size_ + seg->size();
     last_segment_ = seg->last_segment();
@@ -395,8 +455,14 @@ void http_publisher::send_segment(common::segment* seg) {
 CB_TO_MEMFUN(on_send_segment_complete, handle_on_send_segment_complete);
 
 void http_publisher::handle_on_send_segment_complete(http_request* req, http_response* res) {
-    if(!res) {
+
+    if(state_ != sending_segment) {
+        assert(state_ == sending_segment);
+    }
+
+    if(!validate_response(res)) {
         LOG(common::log::err) << "failed " << req->method() << " request to " << req->path() << common::log::end;
+        delete res;
         delete req;
         return;
     }
@@ -435,9 +501,6 @@ void http_publisher::handle_on_send_segment_complete(http_request* req, http_res
         LOG(common::log::err) << "failed to parse response" << common::log::end;
     }
 
-
-    
-
     delete req;
     delete res;
 
@@ -447,6 +510,12 @@ void http_publisher::handle_on_send_segment_complete(http_request* req, http_res
 }
 
 void http_publisher::list_app_folder() {
+
+    if(state_ != listing_root_folder) {
+        assert(state_ == listing_root_folder);
+    }
+
+    state_ = listing_app_folder;
 
     Json::Value root;
     root["path"] = "/_seccam_";
@@ -463,48 +532,13 @@ void http_publisher::list_app_folder() {
 
 CB_TO_MEMFUN(on_list_app_folder_complete, handle_on_list_app_folder_complete);
 
-void http_publisher::append_to_files(Json::Value& entries) {
-    for(int i = 0 ; i < entries.size() ; i++) {
-        Json::Value& entry = entries[i];
-        if(!entry.isObject()) {
-            LOG(common::log::info) << "skip invalid entry" << common::log::end;
-            continue;
-        }
-        Json::Value& tag_resp = entry[".tag"];
-        if(!tag_resp.isString()) {
-            LOG(common::log::info) << "skip invalid entry" << common::log::end;
-            continue;
-        }
-        std::string tag = tag_resp.asString();
-        if(tag == "file") {
-
-            std::string filename = entry["name"].asString();
-            int timestamp = std::atoi(filename.c_str());
-            if(0 == timestamp) {
-                LOG(common::log::err) <<  "invalid file " << filename << common::log::end;
-                continue;
-            }
-            
-            api_file file = {
-                timestamp,
-                filename,
-                entry["path_lower"].asString(),
-                entry["size"].asInt(),
-                entry["client_modified"].asString()
-            };
-
-            files_size_ += file.size;
-
-            bool inserted = files_by_timestamp_.insert(std::make_pair(timestamp, file)).second;
-            assert(true == inserted);
-
-        } else {
-            LOG(common::log::err) << "found unexpected entry " << tag << " ignoring" << common::log::end;
-        }
-    }
-}
-
 void http_publisher::list_app_folder_continue(const std::string& cursor) {
+
+    if(state_ != listing_app_folder) {
+        assert(state_ == listing_app_folder);
+    }
+
+    state_ = listing_app_folder_continue;
 
     Json::Value root;
     root["cursor"] = cursor;
@@ -516,11 +550,18 @@ void http_publisher::list_app_folder_continue(const std::string& cursor) {
 }
 
 void http_publisher::handle_on_list_app_folder_complete(http_request* req, http_response* res) {
-    if(!res) {
+
+    if(state_ != listing_app_folder && state_ != listing_app_folder_continue) {
+        assert(state_ == listing_app_folder || state_ == listing_app_folder_continue);
+    }
+
+    if(!validate_response(res)) {
         LOG(common::log::err) << "failed " << req->method() << " request to " << req->path() << common::log::end;
+        delete res;
         delete req;
         return;
     }
+
     const std::vector<uint8_t>& data = res->data();
     Json::Value json;
     if(parse_json(data, &json)) {
@@ -549,4 +590,65 @@ void http_publisher::handle_on_list_app_folder_complete(http_request* req, http_
     delete req;
     delete res;
 }
+
+
+bool http_publisher::validate_response(http_response* res) {
+    if(res == nullptr) {
+        return false;
+    } else if (res->response_code() != 200) {
+        LOG(common::log::err) << "failed with" << res->response_code() << " " << res->response_phrase() << common::log::end;
+        const std::vector<std::uint8_t>& buf = res->data();
+        if(buf.size() != 0) {
+            const char* begin = reinterpret_cast<const char*>(&buf[0]);
+            const char* end = begin+buf.size();
+            std::string data(begin, end);
+            LOG(common::log::err) << "response " << data << common::log::end;
+        }
+        return false;
+    } else {
+        return true;
+    }
+}
+
+void http_publisher::append_to_files(Json::Value& entries) {
+    for(int i = 0 ; i < entries.size() ; i++) {
+        Json::Value& entry = entries[i];
+        if(!entry.isObject()) {
+            LOG(common::log::info) << "skip invalid entry" << common::log::end;
+            continue;
+        }
+        Json::Value& tag_resp = entry[".tag"];
+        if(!tag_resp.isString()) {
+            LOG(common::log::info) << "skip invalid entry" << common::log::end;
+            continue;
+        }
+        std::string tag = tag_resp.asString();
+        if(tag == "file") {
+
+            std::string filename = entry["name"].asString();
+            int timestamp = std::atoi(filename.c_str());
+            if(0 == timestamp) {
+                LOG(common::log::err) <<  "invalid file " << filename << common::log::end;
+                continue;
+            }
+
+            api_file file = {
+                timestamp,
+                filename,
+                entry["path_lower"].asString(),
+                entry["size"].asInt(),
+                entry["client_modified"].asString()
+            };
+
+            files_size_ += file.size;
+
+            bool inserted = files_by_timestamp_.insert(std::make_pair(timestamp, file)).second;
+            assert(true == inserted);
+
+        } else {
+            LOG(common::log::err) << "found unexpected entry " << tag << " ignoring" << common::log::end;
+        }
+    }
+}
+
 
