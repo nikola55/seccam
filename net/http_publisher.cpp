@@ -50,7 +50,9 @@ http_publisher::http_publisher(
     , file_upload_(nullptr)
     , files_size_(0)
     , last_segment_(false)
-    , state_(initializing) {
+    , state_(initializing)
+    , initial_retry_sec_(2)
+    , max_retry_count_(5) {
 
 
     try {
@@ -414,11 +416,29 @@ void http_publisher::pop_segment() {
     }
 }
 
-static void free_segment(void* ctx) {
-    LOG(common::log::info) << "delete segment" << common::log::end;
-    common::segment* seg = static_cast<common::segment*>(ctx);
-    delete seg;
-}
+class http_publisher::on_segment_sent_handler {
+public:
+    on_segment_sent_handler(http_publisher* publisher, Json::Value* root, common::segment* seg)
+        : publisher_(publisher)
+        , root_(root)
+        , seg_(seg) {
+
+    }
+    ~on_segment_sent_handler() {
+
+    }
+private:
+    on_segment_sent_handler(const on_segment_sent_handler&) = delete;
+    void operator=(const on_segment_sent_handler&);
+public:
+    void execute(net::http_request* req, net::http_response* res) {
+        publisher_->handle_on_send_segment_complete(req, res, root_, seg_);
+    }
+private:
+    http_publisher* publisher_;
+    Json::Value* root_;
+    common::segment* seg_;
+};
 
 void http_publisher::send_segment(common::segment* seg) {
 
@@ -439,7 +459,8 @@ void http_publisher::send_segment(common::segment* seg) {
     std::ostringstream name_str;
     name_str << ts;
 
-    Json::Value root;
+    Json::Value* root_ptr = new Json::Value;
+    Json::Value& root = *root_ptr;
     root["path"] = "/_seccam_/"+name_str.str();
     Json::FastWriter writer;
     std::string json_str = writer.write(root);
@@ -451,15 +472,54 @@ void http_publisher::send_segment(common::segment* seg) {
     request->add_header("Dropbox-API-Arg", json_str);
     request->add_header("Content-Type", "application/octet-stream");
 
-    request->reference_data(seg->buffer(), seg->size(), &free_segment, seg);
+    request->reference_data(seg->buffer(), seg->size());
 
-    file_upload_->make_request(request, http_publisher::on_send_segment_complete, this);
+    file_upload_->make_request(request, http_publisher::on_send_segment_complete,
+                               new on_segment_sent_handler(this, root_ptr, seg));
 
 }
 
-CB_TO_MEMFUN(on_send_segment_complete, handle_on_send_segment_complete);
+void http_publisher::on_send_segment_complete(http_request* req, http_response* res, void* ctx) {
+    on_segment_sent_handler* hnd = static_cast<on_segment_sent_handler*>(ctx);
+    hnd->execute(req, res);
+    delete hnd;
+}
 
-void http_publisher::handle_on_send_segment_complete(http_request* req, http_response* res) {
+bool http_publisher::process_upload_response(Json::Value& json) {
+    bool response_ok = false;
+    Json::Value& name = json["name"];
+    Json::Value& last_modified = json["client_modified"];
+    Json::Value& path_lower = json["path_lower"];
+    Json::Value& size = json["size"];
+    if(name.isString() && last_modified.isString() && path_lower.isString() && size.isNumeric()) {
+        std::string timestamp_str = name.asString();
+        int timestamp = std::atoi(timestamp_str.c_str());
+        if(timestamp > 0) {
+            api_file file = {
+                timestamp,
+                timestamp_str,
+                path_lower.asString(),
+                size.asInt(),
+                last_modified.asString()
+            };
+            files_size_ += file.size;
+            bool inserted = files_by_timestamp_.insert(std::make_pair(timestamp, file)).second;
+            assert(true == inserted);
+            response_ok = true;
+        } else {
+            LOG(common::log::err) << "invalid response filename is not a number" << common::log::end;
+        }
+    } else {
+        LOG(common::log::err) << "invalid response" << common::log::end;
+    }
+    return response_ok;
+}
+
+void http_publisher::handle_on_send_segment_complete(http_request* req,
+                                                     http_response* res,
+                                                     Json::Value* json_arg,
+                                                     common::segment* seg
+                                                     ) {
 
     LOG(common::log::info) << "segment sent" << common::log::end;
 
@@ -471,6 +531,7 @@ void http_publisher::handle_on_send_segment_complete(http_request* req, http_res
         LOG(common::log::err) << "failed " << req->method() << " request to " << req->path() << common::log::end;
         delete res;
         delete req;
+        start_retry_timer(json_arg, seg, 0);
         return;
     }
 
@@ -479,30 +540,10 @@ void http_publisher::handle_on_send_segment_complete(http_request* req, http_res
     bool send_new_segment = false;
     Json::Value json;
     if(parse_json(data, &json)) {
-        Json::Value& name = json["name"];
-        Json::Value& last_modified = json["client_modified"];
-        Json::Value& path_lower = json["path_lower"];
-        Json::Value& size = json["size"];
-        if(name.isString() && last_modified.isString() && path_lower.isString() && size.isNumeric()) {
-            std::string timestamp_str = name.asString();
-            int timestamp = std::atoi(timestamp_str.c_str());
-            if(timestamp > 0) {
-                api_file file = {
-                    timestamp,
-                    timestamp_str,
-                    path_lower.asString(),
-                    size.asInt(),
-                    last_modified.asString()
-                };
-                files_size_ += file.size;
-                bool inserted = files_by_timestamp_.insert(std::make_pair(timestamp, file)).second;
-                assert(true == inserted);
-                send_new_segment = true;
-            } else {
-                LOG(common::log::err) << "invalid response filename is not a number" << common::log::end;
-            }
+        if(process_upload_response(json)) {
+            send_new_segment = true;
         } else {
-            LOG(common::log::err) << "invalid response" << common::log::end;
+            LOG(common::log::err) << "failed to process response" << common::log::end;
         }
     } else {
         LOG(common::log::err) << "failed to parse response" << common::log::end;
@@ -510,6 +551,8 @@ void http_publisher::handle_on_send_segment_complete(http_request* req, http_res
 
     delete req;
     delete res;
+    delete json_arg;
+    delete seg;
 
     if(send_new_segment) {
         LOG(common::log::info) << "pop new segment" << common::log::end;
@@ -599,6 +642,177 @@ void http_publisher::handle_on_list_app_folder_complete(http_request* req, http_
     delete res;
 }
 
+class http_publisher::retry_timer_handler {
+public:
+    retry_timer_handler(event* self, http_publisher* publisher, Json::Value* json_arg, common::segment* seg, int retry_cnt)
+        : self_(self)
+        , publisher_(publisher)
+        , json_arg_(json_arg)
+        , seg_(seg)
+        , retry_cnt_(retry_cnt) {
+
+    }
+    ~retry_timer_handler() {
+        event_free(self_);
+    }
+private:
+    retry_timer_handler(const retry_timer_handler&);
+    void operator=(const retry_timer_handler&);
+public:
+    void execute() {
+        publisher_->handle_on_retry_expired(retry_cnt_, json_arg_, seg_);
+    }
+private:
+    event* self_;
+    http_publisher* publisher_;
+    Json::Value* json_arg_;
+    common::segment* seg_;
+    int retry_cnt_;
+};
+
+void http_publisher::start_retry_timer(Json::Value* json_arg, common::segment* seg, int retry_count) {
+
+    if(state_ != sending_segment && state_ != sending_segment_retry) {
+        assert(state_ == sending_segment ||
+               state_ == sending_segment_retry
+               );
+    }
+
+    state_ = sending_segment_retry_timer;
+
+    event* timer = static_cast<event*>(std::malloc(sizeof(event_get_struct_event_size())));
+    retry_timer_handler* hnd = new retry_timer_handler(timer, this, json_arg, seg, retry_count);
+    evtimer_assign(timer, evbase_, &http_publisher::on_retry_timer_expired, hnd);
+
+    timeval timeout;
+    timeout.tv_sec = initial_retry_sec_ + retry_count*initial_retry_sec_;
+    timeout.tv_usec = 0;
+    evtimer_add(timer, &timeout);
+}
+
+void http_publisher::on_retry_timer_expired(int, short what, void* ctx) {
+    retry_timer_handler* hnd = static_cast<retry_timer_handler*>(ctx);
+    hnd->execute();
+    delete hnd;
+}
+
+class http_publisher::on_send_segment_retry_complete_handler {
+public:
+
+    on_send_segment_retry_complete_handler(int retry_cnt,
+                                           http_publisher* publisher,
+                                           Json::Value* json_arg,
+                                           common::segment* seg
+                                           )
+        : retry_cnt_(retry_cnt)
+        , publisher_(publisher)
+        , json_arg_(json_arg)
+        , seg_(seg) {
+
+    }
+
+    ~on_send_segment_retry_complete_handler() { }
+
+private:
+    on_send_segment_retry_complete_handler(const on_send_segment_retry_complete_handler&) = delete;
+    void operator=(const on_send_segment_retry_complete_handler&) = delete;
+public:
+    void execute(http_request* req, http_response* res) {
+        publisher_->handle_on_send_segment_retry_complete(req, res, retry_cnt_, json_arg_, seg_);
+    }
+
+private:
+    int retry_cnt_;
+    http_publisher* publisher_;
+    Json::Value* json_arg_;
+    common::segment* seg_;
+};
+
+void http_publisher::handle_on_retry_expired(int retry_cnt, Json::Value* json_arg, common::segment* seg) {
+
+    if(state_ != sending_segment_retry_timer) {
+        assert(sending_segment_retry_timer == state_);
+    }
+
+    state_ = sending_segment_retry;
+
+    Json::FastWriter writer;
+    std::string json_str = writer.write(*json_arg);
+    json_str = json_str.substr(0, json_str.size()-1); // erase '\n'
+
+    net::http_request* request = new net::http_request("POST", "/2/files/upload");
+    request->add_header("Host", file_upload_uri_);
+    request->add_header("Authorization", "Bearer "+bearer_);
+    request->add_header("Dropbox-API-Arg", json_str);
+    request->add_header("Content-Type", "application/octet-stream");
+
+    request->reference_data(seg->buffer(), seg->size());
+
+    file_upload_->make_request(request, http_publisher::on_send_segment_retry_complete,
+                               new on_send_segment_retry_complete_handler(retry_cnt, this, json_arg, seg));
+
+}
+
+void http_publisher::on_send_segment_retry_complete(http_request* req, http_response* res, void* ctx) {
+    on_send_segment_retry_complete_handler* hnd = static_cast<on_send_segment_retry_complete_handler*>(ctx);
+    hnd->execute(req, res);
+    delete hnd;
+}
+
+void http_publisher::handle_on_send_segment_retry_complete(http_request* req,
+                                                           http_response* res,
+                                                           int retry_cnt,
+                                                           Json::Value* json_arg,
+                                                           common::segment* seg
+                                                           ) {
+
+    if(state_ != sending_segment_retry) {
+        assert(sending_segment_retry == state_);
+    }
+
+    if(!validate_response(res)) {
+        LOG(common::log::err) << "failed " << req->method() << " request to " << req->path() << common::log::end;
+        delete res;
+        delete req;
+
+        if(retry_cnt < max_retry_count_) {
+            start_retry_timer(json_arg, seg, retry_cnt+1);
+        } else {
+            delete json_arg;
+            delete seg;
+            // TODO: terminate
+            assert(NULL == "Retry expired");
+        }
+        return;
+    }
+
+    const std::vector<std::uint8_t>& data = res->data();
+
+    bool send_new_segment = false;
+    Json::Value json;
+    if(parse_json(data, &json)) {
+        if(process_upload_response(json)) {
+            send_new_segment = true;
+        } else {
+            LOG(common::log::err) << "failed to process response" << common::log::end;
+        }
+    } else {
+        LOG(common::log::err) << "failed to parse response" << common::log::end;
+    }
+
+    delete res;
+    delete req;
+    delete json_arg;
+    delete seg;
+
+    if(send_new_segment) {
+        pop_segment();
+    } else {
+        // TODO: terminate
+        assert(false);
+    }
+
+}
 
 bool http_publisher::validate_response(http_response* res) {
     if(res == nullptr) {

@@ -21,7 +21,7 @@ private:
 public:
     void add_header(const std::string& field, const std::string& value);
     void data(const char* buf, std::size_t sz);
-    void reference_data(const void*, std::size_t, void (*)(void*), void*);
+    void reference_data(const void*, std::size_t);
 public:
     const std::string& method() const;
     const std::string& path() const;

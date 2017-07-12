@@ -31,22 +31,9 @@ void http_request::data(const char* buf, std::size_t sz) {
     data_size_+=sz;
 }
 
-struct cleanup_handler {
-    typedef void (*cb_t)(void*);
-    cb_t cb;
-    void* arg;
-    cleanup_handler(cb_t cb, void* arg) : cb(cb), arg(arg) { }
-};
-
-void evbuffer_ref_cleanup(const void *data, size_t datalen, void *extra) {
-    cleanup_handler* chnd = static_cast<cleanup_handler*>(extra);
-    chnd->cb(chnd->arg);
-    delete chnd;
-}
-
-void http_request::reference_data(const void* buf, std::size_t sz, void (*cb)(void*), void* arg) {
+void http_request::reference_data(const void* buf, std::size_t sz) {
     evbuffer *evbuf = evhttp_request_get_output_buffer(http_request_);
-    evbuffer_add_reference(evbuf, buf, sz, &evbuffer_ref_cleanup, new cleanup_handler(cb, arg)); 	
+    evbuffer_add_reference(evbuf, buf, sz, NULL, NULL);
 }
 
 const std::string& http_request::method() const {

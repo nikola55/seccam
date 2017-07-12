@@ -13,6 +13,7 @@ struct event_base;
 struct evdns_base;
 struct event;
 
+
 namespace Json {
     class Value;
 }
@@ -71,6 +72,8 @@ private:
 private:
     void on_enumerate_files_complete();
 private:
+    bool process_upload_response(Json::Value& resp);
+private:
     static void on_list_folders_complete(http_request*, http_response*, void*);
     void handle_on_list_folders_complete(http_request*, http_response*);
 
@@ -80,8 +83,20 @@ private:
     static void on_list_app_folder_complete(http_request*, http_response*, void*);
     void handle_on_list_app_folder_complete(http_request*, http_response*);
 
+    class on_segment_sent_handler;
     static void on_send_segment_complete(http_request*, http_response*, void*);
-    void handle_on_send_segment_complete(http_request*, http_response*);
+    void handle_on_send_segment_complete(http_request*, http_response*, Json::Value* json_arg, common::segment* seg);
+
+    class retry_timer_handler;
+    static void on_retry_timer_expired(int, short what, void*);
+    void handle_on_retry_expired(int retry_cnt, Json::Value* json_arg, common::segment* seg);
+
+    class on_send_segment_retry_complete_handler;
+    static void on_send_segment_retry_complete(http_request* req, http_response* res, void* ctx);
+    void handle_on_send_segment_retry_complete(http_request* req, http_response* res, int retry_cnt, Json::Value* json_arg, common::segment* seg);
+
+private:
+    void start_retry_timer(Json::Value* json_arg, common::segment* seg, int retry_count);
 private:
     bool validate_response(http_response* resp);
 private:
@@ -105,6 +120,8 @@ private:
     std::map<int, api_file> files_by_timestamp_;
     long files_size_;
     bool last_segment_;
+    int initial_retry_sec_;
+    int max_retry_count_;
 private:
     enum http_state {
         initializing,
@@ -118,6 +135,8 @@ private:
         idle,
         popping_segment,
         sending_segment,
+        sending_segment_retry_timer,
+        sending_segment_retry,
         terminating_video
     };
 private:
