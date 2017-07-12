@@ -392,8 +392,8 @@ void http_publisher::on_enumerate_files_complete() {
 }
 
 void http_publisher::pop_segment() {
-    if(state_ != idle && state_ != sending_segment) {
-        assert(state_ == idle || state_ == sending_segment);
+    if(state_ != idle && state_ != sending_segment && state_ != sending_segment_retry) {
+        assert(state_ == idle || state_ == sending_segment || state_ == sending_segment_retry);
         return;
     }
 
