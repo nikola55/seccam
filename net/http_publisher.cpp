@@ -1,5 +1,7 @@
 #include "http_publisher.h"
 
+#include "timer.h"
+
 #include "logging/log.h"
 
 #include "common/segment.h"
@@ -644,16 +646,14 @@ void http_publisher::handle_on_list_app_folder_complete(http_request* req, http_
 
 class http_publisher::retry_timer_handler {
 public:
-    retry_timer_handler(event* self, http_publisher* publisher, Json::Value* json_arg, common::segment* seg, int retry_cnt)
-        : self_(self)
-        , publisher_(publisher)
+    retry_timer_handler(http_publisher* publisher, Json::Value* json_arg, common::segment* seg, int retry_cnt)
+        : publisher_(publisher)
         , json_arg_(json_arg)
         , seg_(seg)
         , retry_cnt_(retry_cnt) {
 
     }
     ~retry_timer_handler() {
-        event_free(self_);
     }
 private:
     retry_timer_handler(const retry_timer_handler&);
@@ -663,7 +663,6 @@ public:
         publisher_->handle_on_retry_expired(retry_cnt_, json_arg_, seg_);
     }
 private:
-    event* self_;
     http_publisher* publisher_;
     Json::Value* json_arg_;
     common::segment* seg_;
@@ -680,17 +679,24 @@ void http_publisher::start_retry_timer(Json::Value* json_arg, common::segment* s
 
     state_ = sending_segment_retry_timer;
 
-    event* timer = static_cast<event*>(std::malloc(sizeof(event_get_struct_event_size())));
-    retry_timer_handler* hnd = new retry_timer_handler(timer, this, json_arg, seg, retry_count);
-    evtimer_assign(timer, evbase_, &http_publisher::on_retry_timer_expired, hnd);
+    std::uint32_t timeout = initial_retry_sec_ + retry_count*initial_retry_sec_;
+    net::timer* timer = new net::timer(evbase_, timeout,
+                                       &http_publisher::on_retry_timer_expired,
+                                       new retry_timer_handler(this, json_arg, seg, retry_count)
+                                       ); // deleted after on_retry_timer_expired
 
-    timeval timeout;
-    timeout.tv_sec = initial_retry_sec_ + retry_count*initial_retry_sec_;
-    timeout.tv_usec = 0;
-    evtimer_add(timer, &timeout);
+
+//    event* timer = static_cast<event*>(std::malloc(sizeof(event_get_struct_event_size())));
+//    retry_timer_handler* hnd = new retry_timer_handler(timer, this, json_arg, seg, retry_count);
+//    evtimer_assign(timer, evbase_, &http_publisher::on_retry_timer_expired, hnd);
+
+//    timeval timeout;
+//    timeout.tv_sec = initial_retry_sec_ + retry_count*initial_retry_sec_;
+//    timeout.tv_usec = 0;
+//    evtimer_add(timer, &timeout);
 }
 
-void http_publisher::on_retry_timer_expired(int, short what, void* ctx) {
+void http_publisher::on_retry_timer_expired(void* ctx) {
     retry_timer_handler* hnd = static_cast<retry_timer_handler*>(ctx);
     hnd->execute();
     delete hnd;

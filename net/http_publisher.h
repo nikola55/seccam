@@ -88,7 +88,7 @@ private:
     void handle_on_send_segment_complete(http_request*, http_response*, Json::Value* json_arg, common::segment* seg);
 
     class retry_timer_handler;
-    static void on_retry_timer_expired(int, short what, void*);
+    static void on_retry_timer_expired(void* ctx);
     void handle_on_retry_expired(int retry_cnt, Json::Value* json_arg, common::segment* seg);
 
     class on_send_segment_retry_complete_handler;
