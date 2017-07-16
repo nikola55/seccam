@@ -685,15 +685,6 @@ void http_publisher::start_retry_timer(Json::Value* json_arg, common::segment* s
                                        new retry_timer_handler(this, json_arg, seg, retry_count)
                                        ); // deleted after on_retry_timer_expired
 
-
-//    event* timer = static_cast<event*>(std::malloc(sizeof(event_get_struct_event_size())));
-//    retry_timer_handler* hnd = new retry_timer_handler(timer, this, json_arg, seg, retry_count);
-//    evtimer_assign(timer, evbase_, &http_publisher::on_retry_timer_expired, hnd);
-
-//    timeval timeout;
-//    timeout.tv_sec = initial_retry_sec_ + retry_count*initial_retry_sec_;
-//    timeout.tv_usec = 0;
-//    evtimer_add(timer, &timeout);
 }
 
 void http_publisher::on_retry_timer_expired(void* ctx) {
