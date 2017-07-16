@@ -191,7 +191,7 @@ int main(int argc,char* argv[]) {
 
     std::string base_uri = "api.dropboxapi.com";
     std::string file_upload_uri = "content.dropboxapi.com";
-    std::string bearer = "###";
+    std::string bearer = "I_MCABHFgHwAAAAAAAAAFTXna1oZPqjwpu8VI63W42xP7yRuBH_nVjiEo2YDQm4B";
 
     int queue_fds[2];
     if(socketpair(AF_UNIX, SOCK_STREAM, 0, queue_fds) < 0) {
@@ -229,6 +229,7 @@ int main(int argc,char* argv[]) {
         if(rc == sizeof(std::uintptr_t)) {
             common::segment* seg = reinterpret_cast<common::segment*>(seg_ptr);
             delete seg;
+            assert(false);
         } else {
             break;
         }

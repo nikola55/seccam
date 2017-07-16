@@ -815,7 +815,7 @@ bool http_publisher::validate_response(http_response* res) {
     if(res == nullptr) {
         return false;
     } else if (res->response_code() != 200) {
-        LOG(common::log::err) << "failed with" << res->response_code() << " " << res->response_phrase() << common::log::end;
+        LOG(common::log::err) << "failed with " << res->response_code() << " " << res->response_phrase() << common::log::end;
         const std::vector<std::uint8_t>& buf = res->data();
         if(buf.size() != 0) {
             const char* begin = reinterpret_cast<const char*>(&buf[0]);
